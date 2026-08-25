@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.coverage
+.coverage.*
+.tox/
+.pytest_cache/
+.nox/
+.mypy_cache/
+.pylintrc
+.pylintrc.*
+
+# Logs and data
+logs/
+*.log
+key_cooldowns.json
+*.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets
+*.key
+.env
+.env.*
+!.env.example
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local secrets (hyphenated name takes precedence when both exist)
+gemini-keys.txt
+gemini_keys.txt

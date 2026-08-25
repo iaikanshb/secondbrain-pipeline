@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Ingest PDFs into the second-brain vault. Two drop zones, not one --
+which folder a file lands in decides how it's processed:
+
+    00-Inbox-Lectures/  lecture slides, tutorials, exam papers.
+                         Classified lecture-vs-practice by content, then
+                         either split into atomic notes (01-Notes/) or kept
+                         intact as practice material (04-Practice/).
+    00-Inbox-Sources/    textbooks, research papers, any reference material.
+                         Always indexed locally for grounding lookups --
+                         never atomized into notes, no filing LLM call at
+                         all, regardless of length.
+
+    ./venv/bin/python ingest.py --inbox     # process both inboxes
+    ./venv/bin/python ingest.py <path.pdf> --source   # one file, source path
+    ./venv/bin/python ingest.py <path.pdf>             # one file, lecture path
+
+Nothing here touches llama-server or the GPU -- every model call is a
+cloud request to Gemini.
+"""
+import os
+import subprocess
+import sys
+
+import audit
+import classify
+import config
+import coverage
+import extract
+import filing
+import practice
+import rebuild
+import textbook_index
+import vault
+
+
+def _notify(title: str, body: str, urgency: str = "normal") -> None:
+    try:
+        subprocess.run(["notify-send", "-u", urgency, "-a", "secondbrain", title, body],
+                        timeout=5, check=False)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
+def ingest_source(pdf_path: str, remove_source_after: bool = False) -> None:
+    """A textbook, paper, or other reference material -- indexed for
+    grounding lookups, never turned into notes."""
+    # Stage first, before anything else references a filename: a genuine
+    # collision (two different courses both dropping an "L0.pdf") gets a
+    # disambiguated archived name back, and that -- not the original
+    # filename -- has to be what every note/index entry cites as source,
+    # or they end up pointing at whatever the *next* colliding upload was.
+    staged_path, is_new = vault.stage_resource(pdf_path)
+    name = os.path.basename(staged_path)
+
+    if not is_new:
+        print(f"[{os.path.basename(pdf_path)}] identical content already indexed as {name}, skipping.")
+        if remove_source_after:
+            os.remove(pdf_path)
+        return
+
+    print(f"[{name}] extracting (source, no OCR fallback)...")
+    result = extract.extract_pdf(staged_path, skip_ocr=True)
+
+    sample = "\n".join(p for p in result.pages[:5] if p)
+    course_guess = classify.infer_course_for_source(sample, vault.known_courses(), filename=name)
+    print(f"[{name}] inferred course: {course_guess}")
+
+    indexed, course_norm = textbook_index.index_textbook(staged_path, course_guess, result=result)
+    print(f"[{name}] indexed {indexed}/{result.page_count} pages for grounding lookups (course={course_norm})")
+
+    vault.git_commit(
+        f"Index {name} as source: {indexed}/{result.page_count} pages, course={course_norm}",
+        paths=[staged_path],
+    )
+    print(f"[{name}] committed.")
+
+    # Only remove the original inbox file once everything above actually
+    # succeeded -- staging alone isn't enough. A failure between staging
+    # and here used to still remove the inbox original (staging+removal
+    # were both done upfront), so a transient failure (a 429, a DNS blip)
+    # silently dropped the file from the retry queue even though nothing
+    # had actually been filed yet -- confirmed live, not hypothetical.
+    # stage_resource() is idempotent on retry (identical content is a
+    # no-op, returns the same already-staged path), so re-running this
+    # whole function on the same still-present inbox file is always safe.
+    if remove_source_after:
+        os.remove(pdf_path)
+
+    # The exact scenario this closes: a lecture got filed (and its terse
+    # slides expanded from general knowledge, flagged llm-expanded) before
+    # this course had any indexed source -- now one just landed, so
+    # anything waiting on it gets re-grounded immediately, not left stale
+    # until someone remembers to check.
+    regrounded = rebuild.rebuild(course_filter=course_norm)
+    if regrounded:
+        print(f"[{name}] re-grounded {len(regrounded)} previously-unsourced note(s): {', '.join(regrounded)}")
+
+
+def ingest_lecture(pdf_path: str, remove_source_after: bool = False) -> None:
+    """Lecture slides, tutorials, or exam papers -- classified and filed
+    either as atomic notes or as intact practice material."""
+    # Stage first -- see ingest_source for why. A genuine filename
+    # collision destroyed two real archived sources live before this
+    # existed (two different courses both naming a lecture "L0.pdf"); every
+    # note filed here must cite whatever the archive actually ended up
+    # calling it, not the original (possibly colliding) filename.
+    staged_path, is_new = vault.stage_resource(pdf_path)
+    name = os.path.basename(staged_path)
+
+    if not is_new:
+        print(f"[{os.path.basename(pdf_path)}] identical content already in the vault as {name}, skipping.")
+        if remove_source_after:
+            os.remove(pdf_path)
+        return
+
+    print(f"[{name}] extracting...")
+    result = extract.extract_pdf(staged_path)
+    print(
+        f"[{name}] {result.page_count} pages: "
+        f"{result.pages_extracted_directly} text-layer, {result.pages_ocred} vision-OCR'd, "
+        f"{len(result.review_flags)} flagged for review"
+    )
+
+    doc_type = classify.classify_document(result.text)
+    print(f"[{name}] classified as: {doc_type}")
+
+    touched = [staged_path]
+
+    if doc_type == "practice":
+        print(f"[{name}] filing as practice material...")
+        path = practice.file_practice(result.text, name, result.review_flags)
+        print(f"  wrote {os.path.relpath(path, config.VAULT)}")
+        touched.append(path)
+        flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
+        commit_msg = f"Ingest {name} as practice material{flag_note}"
+    else:
+        print(f"[{name}] filing into vault...")
+        written = filing.file_transcript(result.text, name, result.review_flags)
+        for p in written:
+            print(f"  wrote {os.path.relpath(p, config.VAULT)}")
+
+        print(f"[{name}] checking coverage...")
+        note_bodies = []
+        for p in written:
+            with open(p, encoding="utf-8") as f:
+                note_bodies.append(f.read())
+        missing = coverage.check_coverage(result.text, note_bodies)
+        recovered = []
+        if missing:
+            print(f"[{name}] {len(missing)} page(s) with uncovered content, recovering...")
+            recovered = filing.file_transcript(
+                coverage.missing_text(result.pages, missing), f"{name} (coverage recovery)", []
+            )
+            for p in recovered:
+                print(f"  recovered: {os.path.relpath(p, config.VAULT)}")
+            written += recovered
+
+        touched += written
+        flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
+        recovery_note = f", {len(recovered)} recovered by coverage check" if recovered else ""
+        commit_msg = (
+            f"Ingest {name}: {len(written)} note(s) "
+            f"({result.pages_extracted_directly} text-layer, {result.pages_ocred} OCR'd{flag_note}{recovery_note})"
+        )
+
+    vault.git_commit(commit_msg, paths=touched)
+    print(f"[{name}] committed.")
+
+    # Only remove the original inbox file once everything above actually
+    # succeeded -- see ingest_source() for why this can't happen any
+    # earlier. Confirmed live: a DNS blip mid-coverage-check silently
+    # dropped a file from the retry queue when staging+removal happened
+    # upfront instead.
+    if remove_source_after:
+        os.remove(pdf_path)
+
+
+def _process_inbox(dir_path: str, handler) -> tuple[list[str], int]:
+    """Returns (failed filenames, count that succeeded)."""
+    pdfs = [
+        os.path.join(dir_path, f)
+        for f in sorted(os.listdir(dir_path))
+        if f.lower().endswith(".pdf")
+    ]
+    failures = []
+    for p in pdfs:
+        try:
+            handler(p, remove_source_after=True)
+        except FileNotFoundError:
+            # Vanished between the listdir() above and this file's turn
+            # (e.g. a sync client mid-delete) -- there's nothing left to
+            # retry, so this isn't a real failure. Confirmed live: a
+            # stale/synced-away "L3.pdf" produced a misleading "FAILED,
+            # left in inbox for retry" for a file that was never coming
+            # back.
+            print(f"[{os.path.basename(p)}] no longer in the inbox, skipping.")
+        except Exception as e:
+            # One bad/rate-limited file must not block the rest of the
+            # batch -- it stays in the inbox (not removed on failure) and
+            # the timer's next run retries it automatically.
+            print(f"[{os.path.basename(p)}] FAILED, left in inbox for retry: {e}")
+            failures.append(os.path.basename(p))
+    return failures, len(pdfs) - len(failures)
+
+
+def _run_audit() -> None:
+    """Read-only, no LLM calls -- cheap enough to run after every batch that
+    actually changed the vault. Broken links are a real bug (a link was
+    supposed to resolve and doesn't) and get a critical desktop notification,
+    same pattern llmstack uses. Orphans are only ever informational here --
+    a new orphan isn't necessarily wrong, it needs a human call, not an
+    alarm -- so it's logged, not pushed."""
+    print("\n--- audit ---")
+    broken, orphans = audit.audit()
+    if broken:
+        _notify("second-brain: broken links found",
+                f"{len(broken)} link(s) point to notes that don't exist -- check ingest.log",
+                urgency="critical")
+    if orphans:
+        print(f"({len(orphans)} orphan(s) -- not necessarily a problem, see README)")
+
+
+def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "--inbox":
+        # Lectures first: lecture material usually self-identifies its
+        # course clearly (a title/header), while a paper or textbook often
+        # doesn't -- so lectures establish the course name known_courses()
+        # offers, and a source dropped in the same batch can then actually
+        # match it instead of guessing its own new label. (Grounding lookups
+        # aren't affected by this order -- they happen per-note at filing
+        # time regardless of when a source was indexed.)
+        lecture_failures, lecture_ok = _process_inbox(config.INBOX_LECTURES, ingest_lecture)
+        source_failures, source_ok = _process_inbox(config.INBOX_SOURCES, ingest_source)
+        total_failed = len(lecture_failures) + len(source_failures)
+        total_ok = lecture_ok + source_ok
+
+        if total_failed:
+            print(f"{total_failed} file(s) failed this run, left for retry: "
+                  f"{', '.join(lecture_failures + source_failures)}")
+        if total_ok:
+            print(f"done: {total_ok} file(s) processed.")
+        elif not total_failed:
+            print("both inboxes empty.")
+
+        if total_ok:
+            # Only worth the (cheap, local, no-LLM) check when the vault
+            # actually changed -- a pure no-op run has nothing new to audit.
+            _run_audit()
+        return
+
+    if len(sys.argv) == 3 and sys.argv[2] == "--source":
+        ingest_source(sys.argv[1])
+        _run_audit()
+        return
+
+    if len(sys.argv) != 2:
+        print(__doc__)
+        sys.exit(1)
+
+    ingest_lecture(sys.argv[1])
+    _run_audit()
+
+
+if __name__ == "__main__":
+    main()

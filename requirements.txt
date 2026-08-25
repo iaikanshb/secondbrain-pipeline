@@ -1,0 +1,4 @@
+PyMuPDF>=1.18.0
+requests>=2.25.0
+PyYAML>=5.4.0
+json-repair>=0.27.0

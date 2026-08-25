@@ -1,0 +1,13 @@
+#!/bin/bash
+# Runs ingest.py against the inbox. No-ops instantly if it's empty.
+# Called on a timer by secondbrain-ingest.service -- see that unit for cadence.
+# -u: stdout is block-buffered when redirected to a pipe otherwise, so a
+# run in progress shows nothing in ingest.log until it exits.
+# Timestamps are added here, not in ingest.py, because ingest.py's prints
+# also go to a live terminal on manual/one-off runs where a timestamp
+# prefix is just noise -- this wrapper only fires on the timer.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+./.venv/bin/python -u ingest.py --inbox 2>&1 | while IFS= read -r line; do
+    printf '%(%Y-%m-%d %H:%M:%S)T %s\n' -1 "$line"
+done >> logs/ingest.log
