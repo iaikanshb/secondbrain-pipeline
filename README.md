@@ -163,10 +163,29 @@ re-grounded (`rebuild.py`) — see below.
 
 Obsidian's own search (or the Omnisearch plugin) is fast keyword/fuzzy
 matching — great when you remember roughly the words a note uses, useless
-when you only remember the idea. If `EMBEDDING_URL` is set to any
-OpenAI-compatible embeddings endpoint (a local `llama.cpp`/Ollama server,
-a cloud provider, anything that answers `POST <url>` with
-`{"input": "..."}` the way `/v1/embeddings` does), three things activate:
+when you only remember the idea. Configuring an embedding provider
+activates three things (below): `embeddings.py`, `search.py`, and a
+second candidate pass in `dedupe.py`.
+
+Two provider options, both opt-in — with neither configured, everything
+behaves exactly as it did before this existed:
+
+- **`EMBEDDING_PROVIDER=gemini`** — no local server or separate account
+  needed. Reuses the exact same `GEMINI_API_KEY` / rotation keys already
+  required for the rest of the pipeline, via `gemini_client.py`'s
+  existing retry/rotation machinery (confirmed live against
+  `gemini-embedding-001`). This is the option for anyone without a local
+  embedding server — genuinely zero extra setup if `ingest.py` already
+  works. Not the default even when a Gemini key is configured (which is
+  everyone): it adds real load to the same free-tier quota the filing
+  pipeline depends on, so opting in has to be explicit.
+- **`EMBEDDING_URL`** (provider defaults to `openai_compatible`) — any
+  endpoint that answers `POST <url>` with `{"input": "..."}` the way
+  `/v1/embeddings` does: a local `llama.cpp`/Ollama server, OpenAI's own
+  API, another cloud provider. Set `EMBEDDING_API_KEY` too if it needs
+  one.
+
+With either set, three things activate:
 
 - **`embeddings.py`** — every note gets embedded and stored the moment
   it's written or merged (called from `filing.py`, no separate step),
@@ -194,6 +213,37 @@ this, or repairs it if it's ever lost/corrupted:
 ./.venv/bin/python reindex_embeddings.py         # only notes missing from the index
 ./.venv/bin/python reindex_embeddings.py --all   # re-embed everything
 ```
+
+Switching `EMBEDDING_PROVIDER` requires `--all`: different providers/
+models produce different-length vectors (the local Qwen3 setup used
+during development returns 1024 dims, `gemini-embedding-001` returns
+3072), and a length mismatch is treated as similarity 0 rather than
+silently compared wrong.
+
+### Obsidian plugin
+
+`obsidian-plugin/` is a minimal, dependency-free plugin (plain JS, no
+build step) that puts `search.py` behind a native Obsidian command
+instead of a terminal: type-ahead results, click (or press enter) to jump
+straight to the note. Not published to the community plugin directory,
+so it's a manual install:
+
+1. Copy `obsidian-plugin/` into `<vault>/.obsidian/plugins/secondbrain-semantic-search/`.
+2. In Obsidian: Settings → Community plugins → enable **Second Brain
+   Semantic Search**.
+3. In its settings tab, set **search.py path** to the full path of
+   `search.py` on that machine (and **Python executable** if `python3`
+   isn't on `PATH`).
+4. Run the command **"Semantic search across vault"** (`Ctrl/Cmd+P`, or
+   bind it to a hotkey).
+
+It shells out to `search.py` for every query (debounced ~300ms) rather
+than reimplementing embedding calls or index reading in JavaScript —
+`search.py`/`embeddings.py` stay the single source of truth, this only
+adds UI. Desktop-only (mobile Obsidian can't spawn a subprocess). Install
+it separately on each machine you use — plugins are local app
+configuration the same way a workspace layout is, not vault content, so
+this repo doesn't try to sync it for you.
 
 Every one of these treats an unset or unreachable `EMBEDDING_URL` as
 "feature unavailable," never an error — the vault has to work identically

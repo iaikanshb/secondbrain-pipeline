@@ -1,0 +1,11 @@
+.semantic-search-title {
+  font-weight: 500;
+}
+
+.semantic-search-score {
+  color: var(--text-muted);
+}
+
+.semantic-search-error {
+  color: var(--text-error);
+}

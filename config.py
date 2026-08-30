@@ -50,16 +50,29 @@ FLASHCARDS = os.path.join(VAULT, "06-Flashcards")
 
 TEXTBOOK_DB = os.path.join(PROJECT_ROOT, "textbook_index.db")
 
-# Optional: any OpenAI-compatible embeddings endpoint (local llama.cpp,
-# Ollama, a cloud provider, whatever). Every caller must treat an unset
-# EMBEDDING_URL as "semantic features unavailable" and degrade gracefully
-# -- the vault has to keep working exactly as before for anyone who hasn't
-# configured one. Lives inside the vault itself (embeddings.py writes to
-# VAULT, not PROJECT_ROOT) so it rides along on the same Syncthing sync as
-# everything else, since this only ever gets built on whichever machine
-# runs ingest.py.
+# Optional semantic layer (search.py, dedupe.py's second candidate pass).
+# Two provider modes, both opt-in -- with neither configured, every
+# embeddings.py function is a no-op and the vault behaves exactly as it
+# did before this existed:
+#
+#   openai_compatible (default once EMBEDDING_URL is set) -- any endpoint
+#   that answers POST <url> {"input": "..."} the way /v1/embeddings does:
+#   a local llama.cpp/Ollama server, a cloud provider, anything.
+#
+#   gemini (EMBEDDING_PROVIDER=gemini) -- no local server or separate
+#   account needed: reuses the exact same GEMINI_API_KEY / key-rotation
+#   already required for the rest of the pipeline, via gemini_client's
+#   embed_call(). The zero-extra-setup option for anyone without a local
+#   embedding server. Deliberately NOT the default even when a Gemini key
+#   is already configured (which is everyone) -- opting into it must be
+#   explicit, since it adds real load to the same free-tier quota the
+#   filing pipeline depends on.
+EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "openai_compatible").strip().lower()
 EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "")
 EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+# Lives inside the vault itself (VAULT, not PROJECT_ROOT) so it rides
+# along on the same sync as everything else -- built only on whichever
+# machine runs ingest.py, read from any machine that has the vault.
 EMBEDDINGS_DB = os.path.join(VAULT, ".embeddings.db")
 
 # gemini-flash-latest and gemini-2.5-flash both failed live (503 / 404).

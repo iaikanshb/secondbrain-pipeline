@@ -1,0 +1,10 @@
+{
+  "id": "secondbrain-semantic-search",
+  "name": "Second Brain Semantic Search",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Finds notes by meaning, not just keywords, using the secondbrain-pipeline's local embedding index. Complements Obsidian's built-in search / Omnisearch rather than replacing them.",
+  "author": "secondbrain-pipeline",
+  "authorUrl": "https://github.com/iaikanshb/secondbrain-pipeline",
+  "isDesktopOnly": true
+}

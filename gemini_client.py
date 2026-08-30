@@ -89,10 +89,18 @@ def _retry_delay(resp: requests.Response, attempt: int) -> float:
     return 5 * (attempt + 1)
 
 
-def _try_model(model: str, keys: list[str], payload: dict, timeout: int) -> tuple[dict | None, str | None]:
+def _try_model(model: str, keys: list[str], payload: dict, timeout: int,
+                url_template: str = config.GEMINI_URL) -> tuple[dict | None, str | None]:
     """Returns (response_json, None) on success, (None, last_error) if every
     key is exhausted/failing for this model -- caller moves on to the next
-    model rather than sleep-retrying a model already confirmed dead."""
+    model rather than sleep-retrying a model already confirmed dead.
+
+    url_template lets a caller point this same rotation/retry machinery
+    (cooldowns, 429/401/403/503 handling) at a different Gemini API
+    surface -- e.g. embedContent instead of generateContent -- without
+    duplicating any of the failure-handling logic below, which exists
+    entirely because of bugs confirmed live on the generateContent path
+    and would be exactly as likely to recur on any other endpoint."""
     max_attempts = len(keys) + 2
     last_err = None
     keys_tried = 0
@@ -104,7 +112,7 @@ def _try_model(model: str, keys: list[str], payload: dict, timeout: int) -> tupl
         scanned += 1
 
     for attempt in range(max_attempts):
-        url = config.GEMINI_URL.format(model=model, key=keys[key_idx])
+        url = url_template.format(model=model, key=keys[key_idx])
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
         except requests.exceptions.RequestException as e:
@@ -158,11 +166,12 @@ def _try_model(model: str, keys: list[str], payload: dict, timeout: int) -> tupl
     return None, last_err
 
 
-def _post(payload: dict, timeout: int = 90) -> dict:
+def _post(payload: dict, timeout: int = 90, models: list[str] | None = None,
+           url_template: str = config.GEMINI_URL) -> dict:
     keys = _get_keys()
     last_err = None
-    for model in _models():
-        result, err = _try_model(model, keys, payload, timeout)
+    for model in (models if models is not None else _models()):
+        result, err = _try_model(model, keys, payload, timeout, url_template=url_template)
         if result is not None:
             return result
         last_err = err
@@ -210,3 +219,22 @@ def json_call(prompt: str) -> dict:
     # (\text, \begin{cases}, ...) where JSON needs \\ -- seen live, not
     # hypothetical. json_repair tolerates this instead of hard-failing.
     return json_repair.loads(raw)
+
+
+# gemini-embedding-001 confirmed live (2026-08-30): a real GA model (not
+# -preview), returns 3072-dim vectors via embedContent. This is the "no
+# extra credential" cloud embedding path -- reuses the exact same keys
+# already required for the rest of the pipeline to work at all, so it's
+# genuinely zero additional setup for anyone who doesn't have a local
+# embedding server (see embeddings.py / EMBEDDING_PROVIDER=gemini).
+EMBED_MODEL = "gemini-embedding-001"
+EMBED_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "{model}:embedContent?key={key}"
+)
+
+
+def embed_call(text: str) -> list[float]:
+    payload = {"content": {"parts": [{"text": text}]}}
+    response = _post(payload, timeout=30, models=[EMBED_MODEL], url_template=EMBED_URL)
+    return response["embedding"]["values"]
