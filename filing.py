@@ -11,6 +11,7 @@ notation/treatment taught), falling back to the model's general knowledge
 import datetime
 
 import dedupe
+import embeddings
 import gemini_client
 import textbook_index
 import vault
@@ -214,5 +215,12 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
         )
         written_paths.append(path)
         dedupe_pool.append({"title": title, "tags": note.get("tags", []), "course": note.get("course", "")})
+
+        # Re-read from disk rather than embed the pre-write `body` -- a
+        # dedupe redirect means the file on disk may be an LLM-merged
+        # combination of this content and an existing note, not what was
+        # just proposed. No-ops entirely if embeddings aren't configured.
+        with open(path, encoding="utf-8") as f:
+            embeddings.reindex_note(title, f.read())
 
     return written_paths

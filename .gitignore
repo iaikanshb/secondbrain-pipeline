@@ -18,6 +18,7 @@ __pycache__/
 logs/
 *.log
 key_cooldowns.json
+.anki_sync_state.json
 *.db
 
 # Virtual environments

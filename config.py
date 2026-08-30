@@ -1,6 +1,31 @@
 import os
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv() -> None:
+    """Auto-loads .env if present, without overriding anything already set
+    in the real environment -- explicit `set -a; source .env; set +a` (as
+    documented in the README) still works exactly as before and takes
+    precedence. This exists so interactive one-off scripts (e.g. search.py)
+    don't need manual sourcing every session; the systemd timer loads the
+    same file via its own EnvironmentFile= directive instead."""
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+
+
+_load_dotenv()
+
 VAULT = os.path.expanduser(
     os.environ.get("SECONDBRAIN_VAULT", "~/Documents/second-brain")
 )
@@ -24,6 +49,18 @@ MOCS = os.path.join(VAULT, "05-MOCs")
 FLASHCARDS = os.path.join(VAULT, "06-Flashcards")
 
 TEXTBOOK_DB = os.path.join(PROJECT_ROOT, "textbook_index.db")
+
+# Optional: any OpenAI-compatible embeddings endpoint (local llama.cpp,
+# Ollama, a cloud provider, whatever). Every caller must treat an unset
+# EMBEDDING_URL as "semantic features unavailable" and degrade gracefully
+# -- the vault has to keep working exactly as before for anyone who hasn't
+# configured one. Lives inside the vault itself (embeddings.py writes to
+# VAULT, not PROJECT_ROOT) so it rides along on the same Syncthing sync as
+# everything else, since this only ever gets built on whichever machine
+# runs ingest.py.
+EMBEDDING_URL = os.environ.get("EMBEDDING_URL", "")
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+EMBEDDINGS_DB = os.path.join(VAULT, ".embeddings.db")
 
 # gemini-flash-latest and gemini-2.5-flash both failed live (503 / 404).
 # gemini-3.6-flash worked initially but its free-tier quota (20 req,

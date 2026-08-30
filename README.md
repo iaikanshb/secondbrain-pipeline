@@ -2,9 +2,11 @@
 
 Turns dropped-in lecture PDFs into a cross-linked, exam-ready Obsidian
 vault: topic notes, per-lecture study maps, and Anki flashcards, generated
-automatically. Fully decoupled from any local model — every model call is a
-cloud request to Gemini, so it runs on anything with Python and a network
-connection.
+automatically. The core pipeline needs nothing but Python and a network
+connection — every filing/dedup/OCR call is a cloud request to Gemini. An
+entirely optional layer (semantic search, a stronger duplicate check) can
+additionally use any OpenAI-compatible embeddings endpoint, local or cloud
+— everything works exactly the same without one configured.
 
 ## Local setup
 
@@ -14,8 +16,8 @@ Requires Python 3.10+ and an Obsidian vault (the default location is
 ```bash
 ./setup.sh
 cp .env.example .env
-# Edit .env, then load it into the current shell:
-set -a; source .env; set +a
+# Edit .env -- it's auto-loaded by config.py, no sourcing needed (though
+# `set -a; source .env; set +a` still works too, if you prefer that).
 cp courses.txt.example courses.txt   # optional: list your actual courses
 python ingest.py --inbox
 ```
@@ -29,6 +31,10 @@ Credentials are resolved in this order:
 The local key files contain one key per line. They, `.env`, and `courses.txt`
 are all ignored by Git; keep the key files' permissions at `600`. Set
 `SECONDBRAIN_VAULT` to override the default vault location.
+
+For automatic runs (the systemd timer, not manual invocations), `.env` is
+loaded via the service's own `EnvironmentFile=` directive, since a
+background timer has no shell to source anything into.
 
 ## Usage
 
@@ -109,17 +115,21 @@ re-grounded (`rebuild.py`) — see below.
    covers that course. **`practice.py`** (practice) — kept as one intact
    document with original question numbering, questions linked to relevant
    concept notes, no answers generated.
-5. **`dedupe.py`** — before each note is actually written, a cheap local
-   pass (title-token/tag overlap, no LLM) narrows the existing vault down to
-   a handful of plausible candidates, then one LLM call per candidate asks
-   whether the new content genuinely restates an existing note. If so, the
-   note is written under the *existing* note's exact title instead of its
-   own, which routes it into `vault.py`'s normal same-title merge path
-   (below) rather than creating a near-duplicate file under a differently
-   worded title — the actual mechanism behind duplicates observed live (two
+5. **`dedupe.py`** — before each note is actually written, two cheap,
+   no-LLM passes narrow the existing vault down to a handful of plausible
+   candidates: title-token/tag overlap, plus (if `EMBEDDING_URL` is
+   configured) semantic similarity via `embeddings.py`, which catches a
+   genuine duplicate worded so differently the first pass shares no
+   vocabulary with it at all. One LLM call per candidate then asks whether
+   the new content genuinely restates an existing note. If so, the note is
+   written under the *existing* note's exact title instead of its own,
+   which routes it into `vault.py`'s normal same-title merge path (below)
+   rather than creating a near-duplicate file under a differently worded
+   title — the actual mechanism behind duplicates observed live (two
    independently-run filing passes agreeing on content but not on phrasing).
-   Deliberately conservative: a concept taught differently by two courses is
-   *not* a duplicate and must stay two linked notes — see Methodology.
+   Deliberately conservative either way: a concept taught differently by two
+   courses is *not* a duplicate and must stay two linked notes — see
+   Methodology.
 6. **`coverage.py`** — after filing, one call compares every page of the
    source against everything just written and flags any page whose content
    isn't reflected anywhere. Anything flagged gets a recovery filing pass
@@ -148,6 +158,46 @@ re-grounded (`rebuild.py`) — see below.
    `06-Flashcards/<course>.tsv` (plain `front\tback`, Basic note type).
    `git commit`s the result (notes, MOC, flashcards, archived source
    together); every automated write is a one-command revert.
+
+## Semantic search (optional)
+
+Obsidian's own search (or the Omnisearch plugin) is fast keyword/fuzzy
+matching — great when you remember roughly the words a note uses, useless
+when you only remember the idea. If `EMBEDDING_URL` is set to any
+OpenAI-compatible embeddings endpoint (a local `llama.cpp`/Ollama server,
+a cloud provider, anything that answers `POST <url>` with
+`{"input": "..."}` the way `/v1/embeddings` does), three things activate:
+
+- **`embeddings.py`** — every note gets embedded and stored the moment
+  it's written or merged (called from `filing.py`, no separate step),
+  into `.embeddings.db` in the vault root. That file lives *inside* the
+  vault specifically so it rides along on whatever already syncs the vault
+  (Syncthing, etc.) rather than needing its own sync mechanism — written
+  only by whichever machine runs `ingest.py`, read from any machine that
+  has the vault. Plain SQLite, not WAL mode, since WAL's sidecar
+  `-wal`/`-shm` files being copied non-atomically by a file-sync tool is a
+  real corruption risk; a rollback-journal file being caught mid-write by
+  a sync scan is at worst a stale read, never structurally broken.
+- **`search.py`** — `./.venv/bin/python search.py "some vague description
+  of what I'm after"` returns the actual matching notes, even with zero
+  vocabulary overlap. No third-party dependencies, so it runs fine from
+  any machine with the vault synced and this endpoint reachable, not just
+  the one running `ingest.py`.
+- **`dedupe.py`** gets a second, semantic candidate-finding pass (see
+  Pipeline above) — strictly additive to the existing heuristic, so it can
+  only catch more genuine duplicates, never fewer, and never changes the
+  final LLM confirmation step that actually decides.
+
+`reindex_embeddings.py` backfills the index for a vault that predates
+this, or repairs it if it's ever lost/corrupted:
+```bash
+./.venv/bin/python reindex_embeddings.py         # only notes missing from the index
+./.venv/bin/python reindex_embeddings.py --all   # re-embed everything
+```
+
+Every one of these treats an unset or unreachable `EMBEDDING_URL` as
+"feature unavailable," never an error — the vault has to work identically
+for anyone who hasn't configured one.
 
 ## Anki automation (optional)
 
@@ -277,16 +327,22 @@ back to honoring Google's own `retryDelay`.
 
 ## Known gaps
 
-- **No semantic/vector search** — deferred, per the earlier decision not
-  to build GraphRAG-scale infrastructure for a vault this size. Revisit only
-  if flat tags/backlinks stop being enough.
-- **`dedupe.py` is an LLM judgment call, not a guarantee** — narrowed by a
-  cheap local heuristic (title/tag overlap) before the semantic check even
-  runs, so a genuine duplicate with a *very* differently worded title and no
-  shared tags can still slip through undetected. Tuned deliberately toward
-  false negatives (missed duplicates) over false positives (wrongly merged,
-  distinct cross-course notes), since a wrongful merge is the more
-  destructive failure of the two.
+- **Semantic search (`search.py`, `embeddings.py`) is optional and
+  unconfigured by default** — needs an OpenAI-compatible embeddings
+  endpoint you supply yourself (`EMBEDDING_URL`); with nothing configured
+  the vault behaves exactly as it did before this existed. Deliberately
+  did *not* build GraphRAG-scale infrastructure (entity extraction,
+  community detection, hierarchical summarization) — massive overkill,
+  and expensive, for a personal vault this size when plain embeddings
+  solve the actual gap (vocabulary-mismatch search) for a fraction of the
+  cost.
+- **`dedupe.py`'s final call is always an LLM judgment, not a
+  guarantee** — both candidate-finding passes (title/tag heuristic, and
+  semantic similarity when configured) are just narrowing; a genuine
+  duplicate that clears neither pass can still slip through undetected.
+  Tuned deliberately toward false negatives (missed duplicates) over false
+  positives (wrongly merged, distinct cross-course notes), since a
+  wrongful merge is the more destructive failure of the two.
 - **JSON-mode LaTeX escaping**: Gemini's JSON output routinely ships
   single backslashes in LaTeX (`\text` instead of `\\text`), which breaks
   strict `json.loads`. Mitigated with an explicit prompt instruction plus
