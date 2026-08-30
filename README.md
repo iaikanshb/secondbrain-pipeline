@@ -155,7 +155,9 @@ re-grounded (`rebuild.py`) — see below.
    disk.
 9. **`flashcards.py`** — generates retrieval-practice questions from the
    same notes and appends them to that course's Anki-importable
-   `06-Flashcards/<course>.tsv` (plain `front\tback`, Basic note type).
+   `06-Flashcards/<course>.tsv` (plain `front\tback`, imported as the
+   "KaTeX and Markdown Basic (Color)" note type so `$...$`/`$$...$$` math
+   and Markdown render on every client).
    `git commit`s the result (notes, MOC, flashcards, archived source
    together); every automated write is a one-command revert.
 
@@ -252,8 +254,10 @@ for anyone who hasn't configured one.
 ## Anki automation (optional)
 
 `06-Flashcards/*.tsv` are plain files — the simplest path is importing them
-into Anki by hand whenever you want (File → Import, tab-separated, Basic
-note type, "Allow HTML in fields" on since multi-line answers use `<br>`).
+into Anki by hand whenever you want (File → Import, tab-separated, "KaTeX
+and Markdown Basic (Color)" note type — requires the "Markdown Support"
+add-on, AnkiWeb code `1786114227` — "Allow HTML in fields" on since
+multi-line answers use `<br>`).
 
 For hands-off syncing to a phone (AnkiDroid/AnkiMobile via AnkiWeb),
 `anki_sync.py` pushes any new rows into a locally running Anki via

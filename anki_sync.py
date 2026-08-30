@@ -95,7 +95,7 @@ def sync_course(course: str, path: str, state: dict) -> int:
             continue
         note = {
             "deckName": deck,
-            "modelName": "Basic",
+            "modelName": "KaTeX and Markdown Basic (Color)",
             "fields": {"Front": row[0], "Back": row[1]},
             "options": {"allowDuplicate": False, "duplicateScope": "deck"},
         }
