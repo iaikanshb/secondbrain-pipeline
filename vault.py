@@ -220,6 +220,26 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _content_hash(path: str) -> str:
+    """Hash of the PDF's visible text, not its raw bytes -- a lecture PDF
+    re-saved or re-exported (a browser re-download, "print to PDF" again)
+    keeps identical rendered content but can get a fresh trailer/ID, so a
+    raw byte hash misses the duplicate. Confirmed live: "L3.pdf" and
+    "L3 (2).pdf" were byte-different (different sha256, same size) but
+    text-identical, so the old byte-hash check filed both -- 7 redundant
+    LLM calls and two duplicate lecture MOCs for one lecture. Falls back to
+    a raw byte hash for anything pymupdf can't open as a PDF."""
+    try:
+        import hashlib
+
+        import pymupdf
+        doc = pymupdf.open(path)
+        text = "".join(page.get_text() for page in doc)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except Exception:
+        return _sha256(path)
+
+
 def stage_resource(source_path: str) -> tuple[str, bool]:
     """Returns (archived_path, is_new). archived_path may differ from the
     source's own filename. A genuine filename collision (two different
@@ -229,28 +249,29 @@ def stage_resource(source_path: str) -> tuple[str, bool]:
     pointing at a completely different PDF with no warning. Now: a genuine
     collision gets a disambiguated name instead of overwriting anything.
 
-    is_new is False whenever this exact content is already archived
-    anywhere in 02-Resources/, not just under the same filename -- an
-    accidental re-drop under a different name (browser "(2)" suffix, a
-    re-downloaded file) must not silently re-run the whole filing pipeline
-    against content that's already in the vault. Confirmed live: a lecture
-    re-dropped as "L3 (2).pdf" cost ~6 minutes and 7 LLM calls re-merging
-    identical content into the notes "L3.pdf" had already produced."""
+    is_new is False whenever this content is already archived anywhere in
+    02-Resources/, not just under the same filename -- an accidental
+    re-drop under a different name (browser "(2)" suffix, a re-downloaded
+    or re-exported file) must not silently re-run the whole filing
+    pipeline against content that's already in the vault. Identity is by
+    extracted text (see _content_hash), not raw bytes, since a re-export
+    can change the file byte-for-byte while rendering identically -- so no
+    byte-size prefilter either, a differing trailer can shift the size by
+    a few bytes without changing a single visible character."""
     import shutil
     base = os.path.basename(source_path)
     dest = os.path.join(config.RESOURCES, base)
-    src_hash = _sha256(source_path)
+    src_hash = _content_hash(source_path)
 
-    if os.path.exists(dest) and _sha256(dest) == src_hash:
+    if os.path.exists(dest) and _content_hash(dest) == src_hash:
         return dest, False
 
-    src_size = os.path.getsize(source_path)
     if os.path.isdir(config.RESOURCES):
         for fname in os.listdir(config.RESOURCES):
             existing = os.path.join(config.RESOURCES, fname)
             if existing == dest or not os.path.isfile(existing):
                 continue
-            if os.path.getsize(existing) == src_size and _sha256(existing) == src_hash:
+            if _content_hash(existing) == src_hash:
                 return existing, False
 
     if os.path.exists(dest):
