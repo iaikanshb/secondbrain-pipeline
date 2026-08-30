@@ -1,10 +1,10 @@
 # Second Brain Pipeline
 
-Ingests PDFs into `~/Documents/second-brain`. Fully decoupled from
-the local GPU — every model call is a cloud request to Gemini. For backward
-compatibility it can read a primary key from
-`~/llmstack/config/cloud-keys.env`, but that path is configurable and no
-llmstack service is started, stopped, or queued by this project.
+Turns dropped-in lecture PDFs into a cross-linked, exam-ready Obsidian
+vault: topic notes, per-lecture study maps, and Anki flashcards, generated
+automatically. Fully decoupled from any local model — every model call is a
+cloud request to Gemini, so it runs on anything with Python and a network
+connection.
 
 ## Local setup
 
@@ -16,20 +16,19 @@ Requires Python 3.10+ and an Obsidian vault (the default location is
 cp .env.example .env
 # Edit .env, then load it into the current shell:
 set -a; source .env; set +a
+cp courses.txt.example courses.txt   # optional: list your actual courses
 python ingest.py --inbox
 ```
 
 Credentials are resolved in this order:
 
-1. `GEMINI_API_KEY` from the environment.
-2. `GEMINI_API_KEY` from `SECONDBRAIN_KEYFILE` (defaults to the legacy
-   `~/llmstack/config/cloud-keys.env`).
-3. Additional rotation keys from the first existing local file:
+1. `GEMINI_API_KEY` from the environment (e.g. via `.env`).
+2. Additional rotation keys from the first existing local file:
    `gemini-keys.txt`, then legacy `gemini_keys.txt`.
 
-The local key files contain one key per line. They and `.env` are ignored by
-Git; keep their permissions at `600`. Set `SECONDBRAIN_VAULT` to override the
-default vault location.
+The local key files contain one key per line. They, `.env`, and `courses.txt`
+are all ignored by Git; keep the key files' permissions at `600`. Set
+`SECONDBRAIN_VAULT` to override the default vault location.
 
 ## Usage
 
@@ -208,8 +207,8 @@ index cards or a set of disconnected per-lecture documents.
 
 `audit.py` (broken `[[links]]`, orphan notes) runs automatically after any
 batch that actually changed the vault — no manual step. A broken link fires
-a critical desktop notification (`notify-send`, same pattern `llmstack`
-uses); orphans are logged only, not alerted, since a new orphan isn't
+a critical desktop notification (`notify-send`); orphans are logged only,
+not alerted, since a new orphan isn't
 necessarily wrong — it needs a human call, not an alarm. Deliberately does
 **not** auto-rewrite anything it finds — a fuzzy-match "auto-repair" was
 tried and reverted after it silently mangled real `[[Title|alias]]` links
@@ -225,22 +224,20 @@ applied after the fact to content it didn't produce), and it's always one
 
 ## Model and rate limits
 
-Currently `gemini-3.7-flash` (`config.GEMINI_MODEL`) — the same model
-`llmstack`'s own router uses. Was `gemini-3.6-flash` until its free-tier
-quota (20 requests, confirmed live to be tracked **per model per
-project**, not just per key) got fully exhausted across all 5 configured
-keys by same-day testing, with no relief after real waits. Switching model
-tag immediately unblocked the pipeline on the same keys — worth
-remembering if this happens again: try a different model tag on the same
-key before assuming the key itself is dead.
+Currently `gemini-3.7-flash` (`config.GEMINI_MODEL`). Was `gemini-3.6-flash`
+until its free-tier quota (20 requests, confirmed live to be tracked **per
+model per project**, not just per key) got fully exhausted across all
+configured keys by same-day testing, with no relief after real waits.
+Switching model tag immediately unblocked the pipeline on the same keys —
+worth remembering if this happens again: try a different model tag on the
+same key before assuming the key itself is dead.
 
 `gemini_client.py` rotates across multiple API keys (separate Google Cloud
 projects — a single project's quota is shared across its own keys, so only
-*separate* projects help): the primary key comes from the environment or the
-configured backward-compatible key file; add more in
-`gemini-keys.txt` or the legacy `gemini_keys.txt` (one key per line, mode
-`600`, never touches llmstack's own config). The hyphenated filename takes
-precedence if both exist. On a 429, it rotates to the next key immediately with no sleep,
+*separate* projects help): the primary key comes from the environment; add
+more in `gemini-keys.txt` or the legacy `gemini_keys.txt` (one key per
+line, mode `600`). The hyphenated filename takes precedence if both exist.
+On a 429, it rotates to the next key immediately with no sleep,
 records a cooldown for that (key, model) pair in `key_cooldowns.json` so a
 *separate process* (the timer's next tick is always a fresh process) skips
 straight past a key already known to be exhausted instead of wasting a

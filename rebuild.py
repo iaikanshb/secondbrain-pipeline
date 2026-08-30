@@ -5,9 +5,9 @@ filing time -- the "lecture parsed before its textbook" case. Runs
 automatically after every source finishes indexing (see ingest.py); this
 is also the manual/standalone entrypoint.
 
-    ./.venv/bin/python rebuild.py              # check every course
-    ./.venv/bin/python rebuild.py --course BDA # limit to one course
-    ./.venv/bin/python rebuild.py --sources ADA_2026_tut4.pdf,transmission_rate_physics_text_focused.pdf # limit to notes citing specific sources
+    ./.venv/bin/python rebuild.py                 # check every course
+    ./.venv/bin/python rebuild.py --course CS101   # limit to one course
+    ./.venv/bin/python rebuild.py --sources textbook_ch3.pdf,paper2.pdf # limit to notes citing specific sources
 
 """
 import os

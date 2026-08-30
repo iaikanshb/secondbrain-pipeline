@@ -1,0 +1,8 @@
+# Your actual course list -- always offered to the course-inference prompt
+# as the canonical set to match against, one per line. Edit this whenever
+# your course list changes (new semester, dropped course, etc).
+#
+# Copy this file to courses.txt (gitignored) and replace with your own:
+CS101
+MATH201
+PHYS150

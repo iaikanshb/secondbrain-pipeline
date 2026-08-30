@@ -45,3 +45,6 @@ Thumbs.db
 # Local secrets (hyphenated name takes precedence when both exist)
 gemini-keys.txt
 gemini_keys.txt
+
+# Personal course list -- copy courses.txt.example to courses.txt and edit
+courses.txt

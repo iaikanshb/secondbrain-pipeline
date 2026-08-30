@@ -264,8 +264,8 @@ def _process_inbox(dir_path: str, handler) -> tuple[list[str], int]:
 def _run_audit() -> None:
     """Read-only, no LLM calls -- cheap enough to run after every batch that
     actually changed the vault. Broken links are a real bug (a link was
-    supposed to resolve and doesn't) and get a critical desktop notification,
-    same pattern llmstack uses. Orphans are only ever informational here --
+    supposed to resolve and doesn't) and get a critical desktop notification.
+    Orphans are only ever informational here --
     a new orphan isn't necessarily wrong, it needs a human call, not an
     alarm -- so it's logged, not pushed."""
     print("\n--- audit ---")

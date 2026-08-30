@@ -1,6 +1,6 @@
 """Single source of truth for course-code normalization. Used everywhere a
-course gets written or matched -- not just at DB-query time -- so 'ADA',
-'ADA 2026', and 'ada26' collapse to the same stored value instead of
+course gets written or matched -- not just at DB-query time -- so 'CS101',
+'CS101 2026', and 'cs101' collapse to the same stored value instead of
 silently fragmenting into lookalike buckets (seen live: three separate
 spellings for one course before this existed)."""
 import os
