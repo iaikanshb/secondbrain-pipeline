@@ -149,6 +149,37 @@ re-grounded (`rebuild.py`) — see below.
    `git commit`s the result (notes, MOC, flashcards, archived source
    together); every automated write is a one-command revert.
 
+## Anki automation (optional)
+
+`06-Flashcards/*.tsv` are plain files — the simplest path is importing them
+into Anki by hand whenever you want (File → Import, tab-separated, Basic
+note type, "Allow HTML in fields" on since multi-line answers use `<br>`).
+
+For hands-off syncing to a phone (AnkiDroid/AnkiMobile via AnkiWeb),
+`anki_sync.py` pushes any new rows into a locally running Anki via
+[AnkiConnect](https://ankiweb.net/shared/info/2055492159) and triggers a
+sync to AnkiWeb, so the phone app picks them up on its own next sync. It
+only needs to run on whichever machine you actually have Anki installed on
+— not necessarily the same one running `ingest.py`, since Syncthing (or
+any sync of your choice) already keeps `06-Flashcards/` current everywhere.
+No third-party dependencies (stdlib only), so it doesn't need the `.venv`.
+
+One-time setup, done manually (this needs your own AnkiWeb login, which
+isn't something to automate):
+1. Install AnkiConnect: `Tools → Add-ons → Get Add-ons…` in Anki, code
+   `2055492159`, restart Anki when prompted.
+2. Log into your AnkiWeb account via Anki's Sync button, once.
+3. Install AnkiDroid or AnkiMobile on your phone and log into the same
+   account.
+
+After that, `anki_sync.py` only ever adds cards locally (deduped by a
+per-course line-count watermark in `.anki_sync_state.json`, plus
+AnkiConnect's own duplicate check as a second safety net) and asks Anki to
+sync — it never touches your login. It no-ops quietly if Anki isn't
+running, so it's safe to run on a timer (a `systemd --user` unit pair,
+`anki-sync.timer` firing every 15 minutes, checking every 15 minutes
+whether Anki happens to be open, works well).
+
 ## Methodology
 
 The note model is a deliberate three-layer design, arrived at after the
