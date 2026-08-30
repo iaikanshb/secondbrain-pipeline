@@ -7,12 +7,15 @@ duplication/merge risk the notes do, and they're what "study this lecture"
 or "review this whole course" actually opens.
 """
 import os
+import re
 
 import yaml
 
 import config
 import gemini_client
 import vault
+
+WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 
 LECTURE_MOC_PROMPT = """You are writing a "map of content" for one lecture in a student's \
 study vault -- not new material, just a short guided walkthrough tying together the notes \
@@ -56,6 +59,17 @@ def build_lecture_moc(source_name: str, course: str, note_titles: list[str], tod
         LECTURE_MOC_PROMPT.format(source_name=source_name, notes_desc=notes_desc)
     )
     narrative = vault.defuse_invalid_links(narrative, set(note_titles))
+
+    # Structural completeness check -- this MOC only means anything as a
+    # study checklist if it's actually guaranteed to link every note the
+    # lecture produced, and prompting alone isn't reliable enough to trust
+    # for that (same reasoning as coverage.py's page-vs-notes check on the
+    # filing side). No extra LLM call: anything the narrative didn't weave
+    # in gets a plain link appended instead of silently going missing.
+    linked = set(WIKILINK_RE.findall(narrative))
+    missing = [t for t in note_titles if t not in linked]
+    if missing:
+        narrative += "\n\n### Also from this lecture\n" + "\n".join(f"- [[{t}]]" for t in missing)
 
     base = os.path.splitext(source_name)[0]
     moc_title = f"{course} - {base} MOC" if course else f"{base} MOC"
