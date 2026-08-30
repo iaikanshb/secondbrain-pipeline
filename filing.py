@@ -10,6 +10,7 @@ notation/treatment taught), falling back to the model's general knowledge
 """
 import datetime
 
+import dedupe
 import gemini_client
 import textbook_index
 import vault
@@ -33,9 +34,14 @@ Source material to file (from "{source_name}"):
 {transcript}
 ---
 
-Split this into one or more atomic notes -- each note should cover one self-contained concept, \
-not the whole document. Reuse the vault's existing conventions: LaTeX math with $...$, concise \
-prose, [[wikilinks]] to genuinely related existing notes from the list above.
+Split this into topic-sized notes -- each note should cover one coherent subtopic (a concept \
+together with its explanation, definitions, and any worked examples/derivations that belong \
+with it), not a single isolated fact and not the whole document. Prefer fewer, fuller notes: \
+group closely-related sub-points into the same note instead of splitting them out separately \
+-- a good note should be complete enough that a student could study exam material from it \
+alone, roughly the size of a textbook subsection. Reuse the vault's existing conventions: \
+LaTeX math with $...$, concise prose, [[wikilinks]] to genuinely related existing notes from \
+the list above.
 
 Course logistics count as content too -- instructor/TA names, office hours, schedule, assessment \
 weights, exam format, deadlines, attendance/plagiarism policy. Don't silently drop this just \
@@ -176,6 +182,12 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
     written_paths = []
     review_flagged = bool(review_flags)
 
+    # Grows as this batch writes notes, so a later note in the same batch
+    # (or the coverage-recovery call, which re-reads existing_notes() fresh
+    # from disk and so already sees everything the initial pass wrote) gets
+    # checked against siblings too, not just notes that predate this run.
+    dedupe_pool = list(existing)
+
     for note in proposed:
         body, llm_expanded = _expand_if_needed(note, existing_desc)
         body = vault.defuse_invalid_links(body, valid_titles)
@@ -189,8 +201,10 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
             )
             body = flag_note + body
 
+        title = dedupe.resolve_title(note["title"], body, note.get("tags", []), dedupe_pool)
+
         path = vault.write_note(
-            title=note["title"],
+            title=title,
             course=note.get("course", ""),
             tags=note.get("tags", []),
             source=source_name,
@@ -199,5 +213,6 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
             body=body,
         )
         written_paths.append(path)
+        dedupe_pool.append({"title": title, "tags": note.get("tags", []), "course": note.get("course", "")})
 
     return written_paths

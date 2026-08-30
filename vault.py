@@ -177,6 +177,40 @@ def write_practice(title: str, course: str, tags: list[str], source: str,
     return _write_markdown(config.PRACTICE, "practice", title, course, tags, source, created, status, body)
 
 
+def note_course(path: str) -> str:
+    fm, _ = _read_markdown(path)
+    return fm.get("course", "") or ""
+
+
+def write_moc(title: str, course: str, tags: list[str], source: str, created: str,
+              moc_type: str, body: str, overwrite: bool = False) -> str:
+    """overwrite=True skips the normal same-title merge path -- used for the
+    course-level roll-up, which is meant to be fully regenerated each time
+    (a deterministic link list, not narrative content worth LLM-merging
+    with its own previous version). Lecture MOCs go through the normal
+    merge-safe path since a genuine title collision there should behave
+    like everything else in the vault."""
+    os.makedirs(config.MOCS, exist_ok=True)
+    if overwrite:
+        title = sanitize_title(title)
+        path = os.path.join(config.MOCS, f"{title}.md")
+        fm = {
+            "title": title,
+            "type": moc_type,
+            "course": courses_mod.reconcile(course, body) if course else course,
+            "tags": tags,
+            "source": source,
+            "created": created,
+            "status": "clean",
+        }
+        frontmatter = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
+        content = f"---\n{frontmatter}---\n\n{body.strip()}\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+    return _write_markdown(config.MOCS, moc_type, title, course, tags, source, created, "clean", body)
+
+
 def _sha256(path: str) -> str:
     import hashlib
     h = hashlib.sha256()

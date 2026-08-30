@@ -54,6 +54,19 @@ Manual, process both inboxes right now instead of waiting for the timer:
 
 Logs: `logs/ingest.log`. Timer control: `systemctl --user {status,stop,disable} secondbrain-ingest.timer`.
 
+### Vault layout
+
+```
+00-Inbox-Lectures/   drop zone: slides, tutorials, exam papers
+00-Inbox-Sources/    drop zone: textbooks, papers, reference material
+01-Notes/            topic notes filed from lectures (the durable, linkable layer)
+02-Resources/        archived original PDFs, one copy per genuinely distinct source
+03-Attachments/      images/media referenced by notes
+04-Practice/         problem sets/exam papers, kept intact, no answers generated
+05-MOCs/             one map-of-content per lecture + one roll-up per course
+06-Flashcards/       Anki-importable front\tback TSV, one file per course
+```
+
 ## Pipeline
 
 **`00-Inbox-Sources/` → `ingest_source()`** (`ingest.py`): direct text
@@ -61,12 +74,12 @@ extraction only (`extract.py`, `skip_ocr=True` — sources are typed PDFs;
 the rare non-text page is skipped, not OCR'd), course inferred from a
 content sample weighted toward the filename (`classify.infer_course_for_source`),
 indexed locally into SQLite FTS5 (`textbook_index.py`). No filing LLM call,
-no atomic notes generated, regardless of length — an 864-page textbook
-indexes in ~8s with exactly one LLM call total (course inference).
-Re-dropping the same filename+course replaces its entries rather than
-duplicating them. Once indexed, any existing note with `status:
-llm-expanded` (expanded from general knowledge for lack of a source) for
-that course is automatically re-grounded (`rebuild.py`) — see below.
+no notes generated, regardless of length — an 864-page textbook indexes in
+~8s with exactly one LLM call total (course inference). Re-dropping the same
+filename+course replaces its entries rather than duplicating them. Once
+indexed, any existing note with `status: llm-expanded` (expanded from
+general knowledge for lack of a source) for that course is automatically
+re-grounded (`rebuild.py`) — see below.
 
 **`00-Inbox-Lectures/` → `ingest_lecture()`**:
 1. **`extract.py`** — per page, not per document: if the page has a real
@@ -82,35 +95,102 @@ that course is automatically re-grounded (`rebuild.py`) — see below.
    provably lossless.
 3. **`classify.py`** — one cheap call: lecture-shaped content vs. a
    problem set/exam paper.
-4. **`filing.py`** (lecture) — splits the transcript into atomic notes,
-   cross-links/tags against the *entire* vault regardless of course.
-   Notes proposed in the same batch can link each other (the model is
-   shown its own sibling titles). Course logistics (instructor, schedule,
-   grading weights, policies) get captured as their own note instead of
-   being silently dropped for not being an "academic concept" — a real
-   failure mode this was built to close, not a hypothetical one. A note
-   flagged topic-label-only gets expanded in a second pass: grounded
-   against that course's indexed source when `textbook_index.search()`
-   finds one, cited by page number; falls back to general knowledge —
-   flagged `status: llm-expanded` — only when no source covers that course.
-   **`practice.py`** (practice) — kept as one intact document with original
-   question numbering, questions linked to relevant concept notes, no
-   answers generated.
-5. **`coverage.py`** — after filing, one call compares every page of the
+4. **`filing.py`** (lecture) — splits the transcript into topic-sized
+   notes, not one-fact atoms and not the whole document (see
+   [Methodology](#methodology) below for why), cross-links/tags against the
+   *entire* vault regardless of course. Notes proposed in the same batch can
+   link each other (the model is shown its own sibling titles). Course
+   logistics (instructor, schedule, grading weights, policies) get captured
+   as their own note instead of being silently dropped for not being an
+   "academic concept" — a real failure mode this was built to close, not a
+   hypothetical one. A note flagged topic-label-only gets expanded in a
+   second pass: grounded against that course's indexed source when
+   `textbook_index.search()` finds one, cited by page number; falls back to
+   general knowledge — flagged `status: llm-expanded` — only when no source
+   covers that course. **`practice.py`** (practice) — kept as one intact
+   document with original question numbering, questions linked to relevant
+   concept notes, no answers generated.
+5. **`dedupe.py`** — before each note is actually written, a cheap local
+   pass (title-token/tag overlap, no LLM) narrows the existing vault down to
+   a handful of plausible candidates, then one LLM call per candidate asks
+   whether the new content genuinely restates an existing note. If so, the
+   note is written under the *existing* note's exact title instead of its
+   own, which routes it into `vault.py`'s normal same-title merge path
+   (below) rather than creating a near-duplicate file under a differently
+   worded title — the actual mechanism behind duplicates observed live (two
+   independently-run filing passes agreeing on content but not on phrasing).
+   Deliberately conservative: a concept taught differently by two courses is
+   *not* a duplicate and must stay two linked notes — see Methodology.
+6. **`coverage.py`** — after filing, one call compares every page of the
    source against everything just written and flags any page whose content
    isn't reflected anywhere. Anything flagged gets a recovery filing pass
-   automatically, in the same run. This exists because filing's prompt
+   automatically, in the same run (through the same filing + dedupe path
+   above, so a recovered note that overlaps a sibling from the initial pass
+   merges instead of duplicating it). This exists because filing's prompt
    alone silently dropped a whole category of real content once (course
    logistics, before item 4 above was fixed) — this is the structural
    check that catches the *next* unknown category, not just that one.
-6. **`vault.py`** — writes the result. A same-title collision merges into
+7. **`vault.py`** — writes the result. A same-title collision merges into
    the existing note (via LLM) instead of overwriting it — a previous
    version silently destroyed a hand-written note this way; also handles
    a source-filename collision (two different courses both naming a
    lecture "L0.pdf") by archiving under a disambiguated name rather than
    overwriting the earlier archive — also happened live, twice, before the
-   fix. `git commit`s the result; every automated write is a one-command
-   revert.
+   fix.
+8. **`moc.py`** — once filing (and any coverage recovery) is done, builds a
+   lecture MOC: a short narrated walkthrough linking that lecture's notes in
+   reading order, skipped if fewer than two notes came out of the source
+   (nothing to walk through). Then fully regenerates that course's roll-up
+   MOC — a deterministic, no-LLM listing of every lecture MOC for the
+   course, sorted by date, so it can never drift from what's actually on
+   disk.
+9. **`flashcards.py`** — generates retrieval-practice questions from the
+   same notes and appends them to that course's Anki-importable
+   `06-Flashcards/<course>.tsv` (plain `front\tback`, Basic note type).
+   `git commit`s the result (notes, MOC, flashcards, archived source
+   together); every automated write is a one-command revert.
+
+## Methodology
+
+The note model is a deliberate three-layer design, arrived at after the
+first version (pure one-fact-per-note atomism) produced two real problems:
+notes too small and fragmented to actually study from, and duplicate
+content under differently-worded titles.
+
+**Layer 1 — topic notes (`01-Notes/`).** Not one-fact atomism, not
+whole-lecture consolidation: each note is one coherent subtopic — a concept
+with its explanation and any worked examples that belong with it, roughly
+textbook-subsection-sized. This is still cross-linked and tagged against
+the *entire* vault regardless of course, because that cross-course linking
+is the actual point: connecting new material to something already known is
+one of the better-supported memorization techniques, and a concept taught
+in two different courses is more useful side-by-side than merged away. This
+is why `dedupe.py` is deliberately conservative — it only merges genuine
+restatement of the *same* explanation, never two courses' distinct
+treatments of a related idea. When unsure, it keeps notes separate.
+
+**Layer 2 — Maps of Content (`05-MOCs/`).** Pure atomism has a
+well-documented failure mode at scale: once a vault has hundreds of notes,
+finding anything (or reading one lecture start-to-finish before an exam)
+gets hard, because nothing sits above the atom layer. A MOC doesn't hold
+content — it's a short, curated, linked walkthrough per lecture, plus a
+roll-up per course, so "study this lecture" or "review this whole course"
+is one document to open, while the underlying notes stay the reusable,
+cross-linkable layer. Purely additive: MOCs never affect how notes
+themselves are written, linked, or merged.
+
+**Layer 3 — retrieval practice (`06-Flashcards/`).** Note architecture
+alone doesn't drive exam performance as much as retrieval practice does —
+testing yourself beats re-reading by a wide margin in the learning-science
+literature. Rather than reimplementing spaced-repetition scheduling here,
+each lecture's notes get turned into plain Anki-importable flashcards; Anki
+already does scheduling well, so this only generates the cards.
+
+Net effect: the vault stays a genuine cross-course knowledge graph (the
+"second brain" premise), while still functioning as something you can
+actually sit down and study from — a lecture's MOC to read, its notes for
+depth, its flashcards for recall — rather than either a pile of unfindable
+index cards or a set of disconnected per-lecture documents.
 
 ## Re-grounding and coverage recovery
 
@@ -119,7 +199,7 @@ that course is automatically re-grounded (`rebuild.py`) — see below.
   every source finishes indexing; also runnable standalone with
   `--course` or `--sources` to scope it).
 - **`recover_missing.py`** — retroactive version of the coverage check in
-  step 5 above, for lecture sources that were processed before that check
+  step 6 above, for lecture sources that were processed before that check
   existed (or as a periodic sanity pass). Re-extracts each source and
   re-runs OCR where needed, so it costs real calls — a backfill tool, not
   something to run on every timer tick.
@@ -136,6 +216,12 @@ tried and reverted after it silently mangled real `[[Title|alias]]` links
 with no diff shown and no way to review. Report, don't guess. Run it by
 hand anytime with `./.venv/bin/python audit.py` (read-only, no LLM calls,
 free).
+
+The one exception to "never auto-rewrite" is `dedupe.py`'s own merges: when
+it redirects a new note into an existing title, that's an *exact* literal
+title substitution it made itself in the same run (never a fuzzy guess
+applied after the fact to content it didn't produce), and it's always one
+`git revert` away.
 
 ## Model and rate limits
 
@@ -166,6 +252,13 @@ back to honoring Google's own `retryDelay`.
 - **No semantic/vector search** — deferred, per the earlier decision not
   to build GraphRAG-scale infrastructure for a vault this size. Revisit only
   if flat tags/backlinks stop being enough.
+- **`dedupe.py` is an LLM judgment call, not a guarantee** — narrowed by a
+  cheap local heuristic (title/tag overlap) before the semantic check even
+  runs, so a genuine duplicate with a *very* differently worded title and no
+  shared tags can still slip through undetected. Tuned deliberately toward
+  false negatives (missed duplicates) over false positives (wrongly merged,
+  distinct cross-course notes), since a wrongful merge is the more
+  destructive failure of the two.
 - **JSON-mode LaTeX escaping**: Gemini's JSON output routinely ships
   single backslashes in LaTeX (`\text` instead of `\\text`), which breaks
   strict `json.loads`. Mitigated with an explicit prompt instruction plus
@@ -174,3 +267,7 @@ back to honoring Google's own `retryDelay`.
   checking** — an LLM verifying its own output isn't a mathematical
   guarantee of completeness, just a structural catch for whole
   skipped categories/pages, which is the actual failure mode observed live.
+- **MOCs and flashcards add LLM calls per lecture** (one narrative call, one
+  flashcard-generation call, on top of filing/coverage/dedup) — a small,
+  known cost for the study-usability gain, worth knowing if a rate-limited
+  run needs to be triaged.

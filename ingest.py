@@ -18,6 +18,7 @@ which folder a file lands in decides how it's processed:
 Nothing here touches llama-server or the GPU -- every model call is a
 cloud request to Gemini.
 """
+import datetime
 import os
 import subprocess
 import sys
@@ -28,6 +29,8 @@ import config
 import coverage
 import extract
 import filing
+import flashcards
+import moc
 import practice
 import rebuild
 import textbook_index
@@ -59,21 +62,34 @@ def ingest_source(pdf_path: str, remove_source_after: bool = False) -> None:
             os.remove(pdf_path)
         return
 
-    print(f"[{name}] extracting (source, no OCR fallback)...")
-    result = extract.extract_pdf(staged_path, skip_ocr=True)
+    try:
+        print(f"[{name}] extracting (source, no OCR fallback)...")
+        result = extract.extract_pdf(staged_path, skip_ocr=True)
 
-    sample = "\n".join(p for p in result.pages[:5] if p)
-    course_guess = classify.infer_course_for_source(sample, vault.known_courses(), filename=name)
-    print(f"[{name}] inferred course: {course_guess}")
+        sample = "\n".join(p for p in result.pages[:5] if p)
+        course_guess = classify.infer_course_for_source(sample, vault.known_courses(), filename=name)
+        print(f"[{name}] inferred course: {course_guess}")
 
-    indexed, course_norm = textbook_index.index_textbook(staged_path, course_guess, result=result)
-    print(f"[{name}] indexed {indexed}/{result.page_count} pages for grounding lookups (course={course_norm})")
+        indexed, course_norm = textbook_index.index_textbook(staged_path, course_guess, result=result)
+        print(f"[{name}] indexed {indexed}/{result.page_count} pages for grounding lookups (course={course_norm})")
 
-    vault.git_commit(
-        f"Index {name} as source: {indexed}/{result.page_count} pages, course={course_norm}",
-        paths=[staged_path],
-    )
-    print(f"[{name}] committed.")
+        vault.git_commit(
+            f"Index {name} as source: {indexed}/{result.page_count} pages, course={course_norm}",
+            paths=[staged_path],
+        )
+        print(f"[{name}] committed.")
+    except Exception:
+        # stage_resource() copies into 02-Resources/ *before* any of the
+        # above -- that copy alone is what "is_new" checks against, so an
+        # interruption anywhere in this block (network stall, a kill, a
+        # crash) used to leave an uncommitted copy sitting there forever.
+        # Every later run then saw "identical content already indexed"
+        # and silently deleted the inbox original with nothing ever
+        # filed -- confirmed live, cost two lecture PDFs their notes.
+        # Remove the orphaned copy so a retry is treated as genuinely new.
+        if os.path.exists(staged_path):
+            os.remove(staged_path)
+        raise
 
     # Only remove the original inbox file once everything above actually
     # succeeded -- staging alone isn't enough. A failure between staging
@@ -114,58 +130,99 @@ def ingest_lecture(pdf_path: str, remove_source_after: bool = False) -> None:
             os.remove(pdf_path)
         return
 
-    print(f"[{name}] extracting...")
-    result = extract.extract_pdf(staged_path)
-    print(
-        f"[{name}] {result.page_count} pages: "
-        f"{result.pages_extracted_directly} text-layer, {result.pages_ocred} vision-OCR'd, "
-        f"{len(result.review_flags)} flagged for review"
-    )
-
-    doc_type = classify.classify_document(result.text)
-    print(f"[{name}] classified as: {doc_type}")
-
-    touched = [staged_path]
-
-    if doc_type == "practice":
-        print(f"[{name}] filing as practice material...")
-        path = practice.file_practice(result.text, name, result.review_flags)
-        print(f"  wrote {os.path.relpath(path, config.VAULT)}")
-        touched.append(path)
-        flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
-        commit_msg = f"Ingest {name} as practice material{flag_note}"
-    else:
-        print(f"[{name}] filing into vault...")
-        written = filing.file_transcript(result.text, name, result.review_flags)
-        for p in written:
-            print(f"  wrote {os.path.relpath(p, config.VAULT)}")
-
-        print(f"[{name}] checking coverage...")
-        note_bodies = []
-        for p in written:
-            with open(p, encoding="utf-8") as f:
-                note_bodies.append(f.read())
-        missing = coverage.check_coverage(result.text, note_bodies)
-        recovered = []
-        if missing:
-            print(f"[{name}] {len(missing)} page(s) with uncovered content, recovering...")
-            recovered = filing.file_transcript(
-                coverage.missing_text(result.pages, missing), f"{name} (coverage recovery)", []
-            )
-            for p in recovered:
-                print(f"  recovered: {os.path.relpath(p, config.VAULT)}")
-            written += recovered
-
-        touched += written
-        flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
-        recovery_note = f", {len(recovered)} recovered by coverage check" if recovered else ""
-        commit_msg = (
-            f"Ingest {name}: {len(written)} note(s) "
-            f"({result.pages_extracted_directly} text-layer, {result.pages_ocred} OCR'd{flag_note}{recovery_note})"
+    try:
+        print(f"[{name}] extracting...")
+        result = extract.extract_pdf(staged_path)
+        print(
+            f"[{name}] {result.page_count} pages: "
+            f"{result.pages_extracted_directly} text-layer, {result.pages_ocred} vision-OCR'd, "
+            f"{len(result.review_flags)} flagged for review"
         )
 
-    vault.git_commit(commit_msg, paths=touched)
-    print(f"[{name}] committed.")
+        doc_type = classify.classify_document(result.text)
+        print(f"[{name}] classified as: {doc_type}")
+
+        touched = [staged_path]
+
+        if doc_type == "practice":
+            print(f"[{name}] filing as practice material...")
+            path = practice.file_practice(result.text, name, result.review_flags)
+            print(f"  wrote {os.path.relpath(path, config.VAULT)}")
+            touched.append(path)
+            flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
+            commit_msg = f"Ingest {name} as practice material{flag_note}"
+        else:
+            print(f"[{name}] filing into vault...")
+            written = filing.file_transcript(result.text, name, result.review_flags)
+            for p in written:
+                print(f"  wrote {os.path.relpath(p, config.VAULT)}")
+
+            print(f"[{name}] checking coverage...")
+            note_bodies = []
+            for p in written:
+                with open(p, encoding="utf-8") as f:
+                    note_bodies.append(f.read())
+            missing = coverage.check_coverage(result.text, note_bodies)
+            recovered = []
+            if missing:
+                print(f"[{name}] {len(missing)} page(s) with uncovered content, recovering...")
+                recovered = filing.file_transcript(
+                    coverage.missing_text(result.pages, missing), f"{name} (coverage recovery)", []
+                )
+                for p in recovered:
+                    print(f"  recovered: {os.path.relpath(p, config.VAULT)}")
+                written += recovered
+
+            touched += written
+
+            # Structural layer, purely additive: a per-lecture MOC narrating
+            # the notes just written, plus a full regeneration of that
+            # course's roll-up MOC. Skipped (returns None) if too few notes
+            # came out of this source for a walkthrough to be worth anything.
+            today = datetime.date.today().isoformat()
+            course = vault.note_course(written[0]) if written else ""
+            note_titles = [os.path.splitext(os.path.basename(p))[0] for p in written]
+            moc_path = moc.build_lecture_moc(name, course, note_titles, today)
+            if moc_path:
+                print(f"[{name}] wrote lecture MOC: {os.path.relpath(moc_path, config.VAULT)}")
+                touched.append(moc_path)
+                course_moc_path = moc.build_course_moc(course, today)
+                if course_moc_path:
+                    touched.append(course_moc_path)
+
+            # Retrieval practice, generated from the same notes -- appended
+            # to this course's Anki-importable deck, not scheduled here.
+            fresh_bodies = []
+            for p in written:
+                with open(p, encoding="utf-8") as f:
+                    fresh_bodies.append(f.read())
+            cards = flashcards.generate_flashcards(fresh_bodies)
+            card_path = flashcards.append_flashcards(course, cards)
+            if card_path:
+                print(f"[{name}] added {len(cards)} flashcard(s) to {os.path.relpath(card_path, config.VAULT)}")
+                touched.append(card_path)
+
+            flag_note = f", {len(result.review_flags)} page(s) need review" if result.review_flags else ""
+            recovery_note = f", {len(recovered)} recovered by coverage check" if recovered else ""
+            commit_msg = (
+                f"Ingest {name}: {len(written)} note(s) "
+                f"({result.pages_extracted_directly} text-layer, {result.pages_ocred} OCR'd{flag_note}{recovery_note})"
+            )
+
+        vault.git_commit(commit_msg, paths=touched)
+        print(f"[{name}] committed.")
+    except Exception:
+        # See ingest_source() for why this matters: stage_resource() copies
+        # into 02-Resources/ before any of the above runs, and that copy
+        # alone is what a future run's "is_new" check sees. An interruption
+        # here (this exact bug cost EML_Lecture1_GC.pdf and
+        # EML_Lectures2-3_GC.pdf their notes, twice, live) used to leave
+        # that copy behind forever, silently skipped on every retry with
+        # the inbox original already deleted. Remove it so a retry is
+        # treated as genuinely new content.
+        if os.path.exists(staged_path):
+            os.remove(staged_path)
+        raise
 
     # Only remove the original inbox file once everything above actually
     # succeeded -- see ingest_source() for why this can't happen any

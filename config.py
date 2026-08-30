@@ -17,6 +17,14 @@ NOTES = os.path.join(VAULT, "01-Notes")
 RESOURCES = os.path.join(VAULT, "02-Resources")
 ATTACHMENTS = os.path.join(VAULT, "03-Attachments")
 PRACTICE = os.path.join(VAULT, "04-Practice")
+# One MOC per source lecture (narrated links to the topic notes it produced)
+# plus one rolled-up MOC per course -- the actual "read this to study" entry
+# points, additive on top of the atomic/topic note layer, not a replacement.
+MOCS = os.path.join(VAULT, "05-MOCs")
+# Anki-importable front\tback TSV, one file per course, appended to per
+# lecture -- retrieval practice piggybacks on Anki's own scheduler instead
+# of this project reimplementing spaced repetition.
+FLASHCARDS = os.path.join(VAULT, "06-Flashcards")
 
 TEXTBOOK_DB = os.path.join(PROJECT_ROOT, "textbook_index.db")
 
