@@ -48,7 +48,36 @@ MOCS = os.path.join(VAULT, "05-MOCs")
 # of this project reimplementing spaced repetition.
 FLASHCARDS = os.path.join(VAULT, "06-Flashcards")
 
-TEXTBOOK_DB = os.path.join(PROJECT_ROOT, "textbook_index.db")
+# Textbook grounding index (textbook_index.py). Two files with very
+# different durability contracts:
+#
+#   TEXTBOOK_DB -- the SQLite FTS5 index itself. A local cache: rides along
+#   on the vault sync (same reasoning as EMBEDDINGS_DB below) but is
+#   gitignored -- rebuilding it from the archived sources in 02-Resources/
+#   is pure local extraction, so there's nothing worth committing.
+#
+#   TEXTBOOK_MANIFEST -- the small, git-COMMITTED record of every source
+#   that has ever been indexed ({filename: {course, pages}}). This is what
+#   makes the cache recoverable: the DB can vanish (repo regeneration, a
+#   lost file -- both confirmed live) without anything in git noticing,
+#   and an empty DB used to silently degrade every filing decision to
+#   "no source for this course". Now textbook_index.self_heal() rebuilds
+#   anything missing from the manifest, and ingest.py runs that before
+#   every pass.
+TEXTBOOK_DB = os.path.join(VAULT, ".textbook_index.db")
+TEXTBOOK_MANIFEST = os.path.join(VAULT, ".textbook_manifest.json")
+# Pre-2026-09-01 location (project root, gitignored): migrated into the
+# vault on first self_heal() after this change.
+LEGACY_TEXTBOOK_DB = os.path.join(PROJECT_ROOT, "textbook_index.db")
+
+# A file that fails ingest MAX_FILE_FAILURES times in a row (with no
+# modification in between -- an edited/re-dropped file gets a fresh count)
+# is held out of the retry queue instead of being retried every timer tick
+# forever. Confirmed live failure mode: a single PDF whose pages made
+# Gemini return empty responses failed identically every 3 minutes,
+# indefinitely, burning API quota and log noise until noticed by hand.
+MAX_FILE_FAILURES = 3
+FAILURE_STATE_FILE = os.path.join(PROJECT_ROOT, "ingest_failures.json")
 
 # Optional semantic layer (search.py, dedupe.py's second candidate pass).
 # Two provider modes, both opt-in -- with neither configured, every

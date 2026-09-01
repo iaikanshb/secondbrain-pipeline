@@ -86,6 +86,19 @@ indexed, any existing note with `status: llm-expanded` (expanded from
 general knowledge for lack of a source) for that course is automatically
 re-grounded (`rebuild.py`) — see below.
 
+The grounding index is two files with different contracts: the SQLite DB
+(`.textbook_index.db`, inside the vault, gitignored) is a rebuildable
+cache, while `.textbook_manifest.json` (also in the vault, **git-tracked**)
+records every source ever indexed with its course and page count. Every
+`--inbox` run starts with a self-heal pass (`textbook_index.self_heal()`):
+anything the manifest says should exist but the DB lost (deleted, corrupt,
+or partially truncated — all observed live) is re-indexed from the
+archived PDFs in `02-Resources/` with pure local extraction, no LLM calls,
+before anything consults the index. This closes the August 2026 failure
+where a project-root, gitignored DB silently vanished with a repo
+regeneration and a week of lectures were filed "no source for this
+course" despite the textbooks sitting untouched in `02-Resources/`.
+
 **`00-Inbox-Lectures/` → `ingest_lecture()`**:
 1. **`extract.py`** — per page, not per document: if the page has a real
    text layer, extract it directly with PyMuPDF (lossless, free, instant,

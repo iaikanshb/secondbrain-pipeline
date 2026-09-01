@@ -19,6 +19,7 @@ Nothing here touches llama-server or the GPU -- every model call is a
 cloud request to Gemini.
 """
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -43,6 +44,67 @@ def _notify(title: str, body: str, urgency: str = "normal") -> None:
                         timeout=5, check=False)
     except (FileNotFoundError, subprocess.SubprocessError):
         pass
+
+
+def _load_failure_state() -> dict:
+    if not os.path.exists(config.FAILURE_STATE_FILE):
+        return {}
+    try:
+        with open(config.FAILURE_STATE_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_failure_state(state: dict) -> None:
+    try:
+        with open(config.FAILURE_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+    except OSError:
+        pass
+
+
+def _file_identity(path: str) -> tuple:
+    st = os.stat(path)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _record_failure(path: str, err: Exception) -> int:
+    """Increment the consecutive-failure count for this exact file content.
+    Keyed by (mtime, size): re-dropping an edited file starts a fresh
+    count -- only byte-identical repeat failures accumulate. Returns the
+    new count."""
+    state = _load_failure_state()
+    ident = list(_file_identity(path))
+    entry = state.get(path)
+    if entry and entry.get("ident") == ident:
+        entry["count"] += 1
+    else:
+        entry = {"ident": ident, "count": 1}
+    state[path] = entry
+    _save_failure_state(state)
+    return entry["count"]
+
+
+def _clear_failure(path: str) -> None:
+    state = _load_failure_state()
+    if state.pop(path, None) is not None:
+        _save_failure_state(state)
+
+
+def _held_out(path: str) -> bool:
+    """True when this file has failed MAX_FILE_FAILURES times in a row with
+    no modification in between. Held files are skipped (with a log line) so
+    a poison file -- one that fails deterministically, like a deck that
+    makes Gemini return empty content -- stops consuming a timer tick and
+    API quota every run. It is NOT removed: fixing the underlying condition
+    or re-dropping the file (fresh mtime/size) automatically re-queues it."""
+    entry = _load_failure_state().get(path)
+    if not entry:
+        return False
+    if entry.get("ident") != list(_file_identity(path)):
+        return False  # file changed since the failures -- retry freely
+    return entry.get("count", 0) >= config.MAX_FILE_FAILURES
 
 
 def ingest_source(pdf_path: str, remove_source_after: bool = False) -> None:
@@ -75,7 +137,11 @@ def ingest_source(pdf_path: str, remove_source_after: bool = False) -> None:
 
         vault.git_commit(
             f"Index {name} as source: {indexed}/{result.page_count} pages, course={course_norm}",
-            paths=[staged_path],
+            # The manifest entry is half of what makes this index durable
+            # (see config.TEXTBOOK_MANIFEST) -- it must be committed in the
+            # same commit as the archived source, or a later cache loss has
+            # nothing to heal from.
+            paths=[staged_path, config.TEXTBOOK_MANIFEST],
         )
         print(f"[{name}] committed.")
     except Exception:
@@ -241,9 +307,22 @@ def _process_inbox(dir_path: str, handler) -> tuple[list[str], int]:
         if f.lower().endswith(".pdf")
     ]
     failures = []
+    held = 0
     for p in pdfs:
         try:
+            if _held_out(p):
+                # A file that has failed MAX_FILE_FAILURES times in a row
+                # (unchanged) stops being retried every tick -- it stays in
+                # the inbox, but silent. Fix the condition or re-drop the
+                # file and it re-queues itself (see _held_out).
+                held += 1
+                print(f"[{os.path.basename(p)}] failed {config.MAX_FILE_FAILURES}+ "
+                      f"times in a row -- held out of the retry queue (will "
+                      f"re-queue if the file changes)")
+                continue
+
             handler(p, remove_source_after=True)
+            _clear_failure(p)
         except FileNotFoundError:
             # Vanished between the listdir() above and this file's turn
             # (e.g. a sync client mid-delete) -- there's nothing left to
@@ -255,10 +334,23 @@ def _process_inbox(dir_path: str, handler) -> tuple[list[str], int]:
         except Exception as e:
             # One bad/rate-limited file must not block the rest of the
             # batch -- it stays in the inbox (not removed on failure) and
-            # the timer's next run retries it automatically.
+            # the timer's next run retries it automatically. The failure
+            # count is keyed to the file's (mtime, size), so an
+            # edited/re-dropped file starts a fresh count instead of
+            # inheriting the old file's failures.
+            count = _record_failure(p, e)
+            if count >= config.MAX_FILE_FAILURES:
+                _notify(
+                    "second-brain: file held out of retry queue",
+                    f"{os.path.basename(p)} failed {count} times in a row "
+                    f"({e}) -- NOT retrying until it changes. See ingest.log",
+                    urgency="critical",
+                )
             print(f"[{os.path.basename(p)}] FAILED, left in inbox for retry: {e}")
             failures.append(os.path.basename(p))
-    return failures, len(pdfs) - len(failures)
+    if held:
+        print(f"({held} file(s) held out of retry -- see ingest.log / notifications)")
+    return failures, len(pdfs) - len(failures) - held
 
 
 def _run_audit() -> None:
@@ -278,8 +370,26 @@ def _run_audit() -> None:
         print(f"({len(orphans)} orphan(s) -- not necessarily a problem, see README)")
 
 
+def _self_heal_index() -> None:
+    """Repair the grounding index before anything consults it. The DB is a
+    rebuildable cache; the manifest (committed in the vault) is durable --
+    so a lost/corrupt/truncated cache is rebuilt here from the archived
+    sources, instead of silently degrading every filing decision to "no
+    source for this course" (the exact failure that cost every course its
+    textbook grounding between 2026-08-25 and 2026-09-01)."""
+    healed = textbook_index.self_heal()
+    if healed:
+        print(f"[self-heal] rebuilt {len(healed)} missing source(s) into the index: "
+              f"{', '.join(os.path.basename(h) for h in healed)}")
+        vault.git_commit(
+            f"Self-heal textbook index: rebuilt {len(healed)} source(s) from manifest",
+            paths=[config.TEXTBOOK_MANIFEST],
+        )
+
+
 def main() -> None:
     if len(sys.argv) == 2 and sys.argv[1] == "--inbox":
+        _self_heal_index()
         # Lectures first: lecture material usually self-identifies its
         # course clearly (a title/header), while a paper or textbook often
         # doesn't -- so lectures establish the course name known_courses()

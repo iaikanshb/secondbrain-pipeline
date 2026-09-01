@@ -90,7 +90,8 @@ def _retry_delay(resp: requests.Response, attempt: int) -> float:
 
 
 def _try_model(model: str, keys: list[str], payload: dict, timeout: int,
-                url_template: str = config.GEMINI_URL) -> tuple[dict | None, str | None]:
+                url_template: str = config.GEMINI_URL,
+                validate=None) -> tuple[dict | None, str | None]:
     """Returns (response_json, None) on success, (None, last_error) if every
     key is exhausted/failing for this model -- caller moves on to the next
     model rather than sleep-retrying a model already confirmed dead.
@@ -100,7 +101,18 @@ def _try_model(model: str, keys: list[str], payload: dict, timeout: int,
     surface -- e.g. embedContent instead of generateContent -- without
     duplicating any of the failure-handling logic below, which exists
     entirely because of bugs confirmed live on the generateContent path
-    and would be exactly as likely to recur on any other endpoint."""
+    and would be exactly as likely to recur on any other endpoint.
+
+    validate: optional callable checked against every 200 body -- returns
+    None when the body is actually usable, or a short reason string when
+    it isn't. Gemini can return HTTP 200 with NO usable content
+    (prompt blocked, SAFETY/RECITATION truncation, or a bare
+    finishReason=STOP with zero parts -- all confirmed live). Those are
+    model behavior, not key failures, so they retry within the model with
+    the same bounded backoff as a 503 and then fall through to the next
+    fallback model; before validate existed they raised straight out of
+    text_call(), never trying another key or model, and a file that
+    reliably triggered them retried forever on the ingest timer."""
     max_attempts = len(keys) + 2
     last_err = None
     keys_tried = 0
@@ -127,7 +139,20 @@ def _try_model(model: str, keys: list[str], payload: dict, timeout: int,
             return None, last_err
 
         if resp.status_code == 200:
-            return resp.json(), None
+            body = resp.json()
+            problem = validate(body) if validate else None
+            if problem is None:
+                return body, None
+            # A 200 with unusable content is model behavior (recitation/
+            # safety truncation, a blocked or empty generation), not a key
+            # failure -- same treatment as a 503: bounded retry within this
+            # model, then fall through so the caller can try a different
+            # model. No cooldown: the key did exactly what it was asked.
+            last_err = f"{model}: 200 with unusable content ({problem})"
+            if attempt < max_attempts - 1:
+                time.sleep(_retry_delay(resp, attempt))
+                continue
+            return None, last_err
 
         if resp.status_code in (429, 401, 403):
             # 401/403 means this key is invalid/revoked (for this model or
@@ -167,15 +192,32 @@ def _try_model(model: str, keys: list[str], payload: dict, timeout: int,
 
 
 def _post(payload: dict, timeout: int = 90, models: list[str] | None = None,
-           url_template: str = config.GEMINI_URL) -> dict:
+           url_template: str = config.GEMINI_URL,
+           validate=None) -> dict:
     keys = _get_keys()
     last_err = None
     for model in (models if models is not None else _models()):
-        result, err = _try_model(model, keys, payload, timeout, url_template=url_template)
+        result, err = _try_model(model, keys, payload, timeout,
+                                 url_template=url_template, validate=validate)
         if result is not None:
             return result
         last_err = err
     raise RuntimeError(f"Gemini call failed on every model/key: {last_err[:500] if last_err else 'unknown'}")
+
+
+def _require_text(response: dict) -> "str | None":
+    """validate callback for generateContent responses: HTTP 200 alone is
+    not success -- Gemini can return a bare finishReason=STOP with no
+    parts at all (confirmed live on a Lecture 4 deck that then retried
+    every timer tick indefinitely). Naming _text_of's failure conditions
+    here keeps them in one place: the rotation now refuses to accept a
+    body that text_call would only reject after the fact."""
+    candidates = response.get("candidates") or []
+    if not candidates:
+        return f"no candidates (promptFeedback={response.get('promptFeedback')})"
+    if not candidates[0].get("content", {}).get("parts"):
+        return f"no content (finishReason={candidates[0].get('finishReason')})"
+    return None
 
 
 def _text_of(response: dict) -> str:
@@ -183,6 +225,10 @@ def _text_of(response: dict) -> str:
     # generation, or a candidate that hit SAFETY/RECITATION/MAX_TOKENS with
     # nothing generated) -- confirmed live as a bare `KeyError: 'parts'`
     # that gave no clue what actually happened. Surface the reason instead.
+    # (The rotation itself now validates the same conditions via
+    # _require_text, so a response reaching here is normally already
+    # guaranteed usable -- this stays as the backstop for direct callers
+    # and for any provider-side surprise.)
     candidates = response.get("candidates") or []
     if not candidates:
         raise RuntimeError(f"Gemini returned no candidates (promptFeedback={response.get('promptFeedback')})")
@@ -197,7 +243,7 @@ def text_call(prompt: str, json_mode: bool = False) -> str:
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     if json_mode:
         payload["generationConfig"] = {"responseMimeType": "application/json"}
-    return _text_of(_post(payload))
+    return _text_of(_post(payload, validate=_require_text))
 
 
 def vision_call(prompt: str, image_bytes: bytes, mime_type: str = "image/png") -> str:
@@ -210,7 +256,7 @@ def vision_call(prompt: str, image_bytes: bytes, mime_type: str = "image/png") -
             ]
         }]
     }
-    return _text_of(_post(payload))
+    return _text_of(_post(payload, validate=_require_text))
 
 
 def json_call(prompt: str) -> dict:

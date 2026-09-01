@@ -49,3 +49,6 @@ gemini_keys.txt
 
 # Personal course list -- copy courses.txt.example to courses.txt and edit
 courses.txt
+
+# Ingest retry bookkeeping (per-file consecutive failure counts)
+ingest_failures.json

@@ -11,6 +11,7 @@ is also the manual/standalone entrypoint.
 
 """
 import os
+import re
 import sys
 
 import config
@@ -51,6 +52,30 @@ def _rewrite_note(path: str, fm: dict, new_body: str) -> None:
 
 def _strip_status_flag(status: str, flag: str) -> str:
     return "+".join(p for p in status.split("+") if p != flag) or "clean"
+
+
+_CALLOUT_LINE_RE = re.compile(r"^>\s*\[!note\]\s*Expanded from general knowledge", re.IGNORECASE)
+
+
+def _strip_expanded_callout(body: str) -> str:
+    """Mechanically remove the 'Expanded from general knowledge' callout.
+    The reground prompt asks the model not to reproduce it, but prompt
+    compliance is not a guarantee -- and a leftover disclaimer on a
+    properly-grounded note is actively wrong. Runs on every rewritten body
+    regardless of what the model did; no-op when the callout is absent.
+    A blank line left directly behind the removed callout goes too, so the
+    note doesn't start with a doubled gap."""
+    lines = body.splitlines()
+    out = []
+    removed = False
+    for line in lines:
+        if not removed and _CALLOUT_LINE_RE.match(line.strip()):
+            removed = True
+            continue
+        if removed and not out and not line.strip():
+            continue  # blank line immediately after the removed callout
+        out.append(line)
+    return "\n".join(out)
 
 
 def _parse_source_fm(source_field: str) -> list[str]:
@@ -102,6 +127,7 @@ def rebuild(course_filter: str = "", source_filter: str = "") -> list[str]:
             REGROUND_PROMPT.format(existing_notes=existing_desc, body=body, excerpt=excerpt)
         )
         new_body = vault.defuse_invalid_links(new_body, valid_titles)
+        new_body = _strip_expanded_callout(new_body)
 
         fm["status"] = _strip_status_flag(status, "llm-expanded")
         _rewrite_note(path, fm, new_body)
