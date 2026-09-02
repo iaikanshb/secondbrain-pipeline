@@ -56,6 +56,35 @@ def _strip_status_flag(status: str, flag: str) -> str:
 
 _CALLOUT_LINE_RE = re.compile(r"^>\s*\[!note\]\s*Expanded from general knowledge", re.IGNORECASE)
 
+# Regrounding is the one rewrite path in this pipeline that didn't already
+# flag uncertain output for human review the way OCR/filing/coverage do --
+# it just trusted the model to follow "keep a similar level of detail" and
+# "add inline page citations". These are cheap, mechanical signals that it
+# didn't: not proof of a bad regrounding, but enough to warrant a look
+# before trusting the note over the version git already has in history.
+_NOTE_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
+_CITATION_RE = re.compile(r"p\.\s*\d+", re.IGNORECASE)
+
+
+def _degradation_reasons(old_body: str, new_body: str, had_excerpt: bool) -> list[str]:
+    reasons = []
+    if len(new_body) < 0.5 * len(old_body):
+        reasons.append("body shrank by more than half")
+    old_links = {m.strip() for m in _NOTE_WIKILINK_RE.findall(old_body)}
+    new_links = {m.strip() for m in _NOTE_WIKILINK_RE.findall(new_body)}
+    if old_links and not new_links:
+        reasons.append("lost every [[wikilink]] the note previously had")
+    if had_excerpt and not _CITATION_RE.search(new_body):
+        reasons.append("no page citation added despite a textbook excerpt being provided")
+    return reasons
+
+
+def _add_status_flag(status: str, flag: str) -> str:
+    parts = [p for p in status.split("+") if p and p != "clean"]
+    if flag not in parts:
+        parts.append(flag)
+    return "+".join(parts)
+
 
 def _strip_expanded_callout(body: str) -> str:
     """Mechanically remove the 'Expanded from general knowledge' callout.
@@ -97,6 +126,7 @@ def rebuild(course_filter: str = "", source_filter: str = "") -> list[str]:
     valid_titles = {n["title"] for n in existing}
 
     regrounded = []
+    flagged = []
     if not os.path.isdir(config.NOTES):
         return regrounded
 
@@ -129,14 +159,28 @@ def rebuild(course_filter: str = "", source_filter: str = "") -> list[str]:
         new_body = vault.defuse_invalid_links(new_body, valid_titles)
         new_body = _strip_expanded_callout(new_body)
 
-        fm["status"] = _strip_status_flag(status, "llm-expanded")
+        new_status = _strip_status_flag(status, "llm-expanded")
+        reasons = _degradation_reasons(body, new_body, had_excerpt=bool(hits))
+        if reasons:
+            new_status = _add_status_flag(new_status, "review-needed")
+            new_body = (
+                "> [!review] Automatic regrounding may have degraded this note "
+                f"({'; '.join(reasons)}). Compare against the pre-rebuild version in git "
+                "history (`git log -p -- <this file>`) before trusting it fully.\n\n"
+            ) + new_body
+            flagged.append(fname)
+            print(f"  regrounded: {fname}  [flagged: {'; '.join(reasons)}]")
+        else:
+            print(f"  regrounded: {fname}")
+
+        fm["status"] = new_status
         _rewrite_note(path, fm, new_body)
         regrounded.append(fname)
-        print(f"  regrounded: {fname}")
 
     if regrounded:
+        flag_note = f", {len(flagged)} flagged for review" if flagged else ""
         vault.git_commit(
-            f"Re-ground {len(regrounded)} note(s) now that source material exists: "
+            f"Re-ground {len(regrounded)} note(s) now that source material exists{flag_note}: "
             f"{', '.join(regrounded)}",
             paths=[os.path.join(config.NOTES, fname) for fname in regrounded],
         )
