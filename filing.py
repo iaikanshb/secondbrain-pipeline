@@ -169,28 +169,43 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
     )
     proposed = gemini_client.json_call(prompt)
 
-    # Valid link targets: existing notes, plus every title in this same
-    # batch (a batch of notes filed together can legitimately reference
-    # each other even though neither existed before this call). Sanitized
-    # the same way write_note() will sanitize on disk -- otherwise a
-    # same-batch title containing a character write_note() strips (e.g. a
-    # colon) would validate here against a title that never actually gets
-    # written, reproducing the exact filename/title drift bug this was
-    # meant to close.
-    valid_titles = {n["title"] for n in existing} | {vault.sanitize_title(n["title"]) for n in proposed}
-
     today = datetime.date.today().isoformat()
-    written_paths = []
     review_flagged = bool(review_flags)
 
-    # Grows as this batch writes notes, so a later note in the same batch
-    # (or the coverage-recovery call, which re-reads existing_notes() fresh
-    # from disk and so already sees everything the initial pass wrote) gets
+    # Pass 1: expand every note and resolve the title it will *actually*
+    # land under -- dedupe.resolve_title() can redirect a proposed note into
+    # an existing note (a semantic-duplicate merge), so the on-disk title
+    # can differ from what the model proposed. This has to be settled for
+    # the whole batch before any sibling link is checked, or a link to a
+    # proposed title that got redirected away would look invalid (or, worse,
+    # coincidentally match a same-named but wrong target) instead of being
+    # repointed at where that content actually ended up.
+    #
+    # Grows as we go, so a later note in the same batch (or the
+    # coverage-recovery call, which re-reads existing_notes() fresh from
+    # disk and so already sees everything the initial pass wrote) gets
     # checked against siblings too, not just notes that predate this run.
     dedupe_pool = list(existing)
+    resolved = []  # (note, expanded_body, llm_expanded, final_title)
+    title_map = {}  # proposed title (sanitized) -> final on-disk title
 
     for note in proposed:
         body, llm_expanded = _expand_if_needed(note, existing_desc)
+        proposed_title = vault.sanitize_title(note["title"])
+        final_title = vault.sanitize_title(
+            dedupe.resolve_title(note["title"], body, note.get("tags", []), dedupe_pool)
+        )
+        title_map[proposed_title] = final_title
+        resolved.append((note, body, llm_expanded, final_title))
+        dedupe_pool.append({"title": final_title, "tags": note.get("tags", []), "course": note.get("course", "")})
+
+    # Valid link targets: existing notes, plus every title this batch will
+    # actually produce (not the titles it merely proposed -- see title_map).
+    valid_titles = {n["title"] for n in existing} | set(title_map.values())
+
+    written_paths = []
+    for note, body, llm_expanded, title in resolved:
+        body = vault.remap_links(body, title_map)
         body = vault.defuse_invalid_links(body, valid_titles)
 
         if review_flagged:
@@ -202,8 +217,6 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
             )
             body = flag_note + body
 
-        title = dedupe.resolve_title(note["title"], body, note.get("tags", []), dedupe_pool)
-
         path = vault.write_note(
             title=title,
             course=note.get("course", ""),
@@ -214,7 +227,6 @@ def file_transcript(transcript: str, source_name: str, review_flags: list[int]) 
             body=body,
         )
         written_paths.append(path)
-        dedupe_pool.append({"title": title, "tags": note.get("tags", []), "course": note.get("course", "")})
 
         # Re-read from disk rather than embed the pre-write `body` -- a
         # dedupe redirect means the file on disk may be an LLM-merged

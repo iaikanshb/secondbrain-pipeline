@@ -73,6 +73,26 @@ def known_courses() -> list[str]:
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
 
 
+def remap_links(body: str, title_map: dict) -> str:
+    """Rewrite [[Title]] targets that name a note proposed earlier in this
+    same filing batch to wherever that note actually landed on disk --
+    dedupe.resolve_title() can redirect a proposed note into an existing
+    note under a different title (a semantic-duplicate merge), so a
+    sibling note's link to the pre-redirect title would otherwise dangle.
+    Must run before defuse_invalid_links(), which would otherwise see that
+    now-nonexistent proposed title and strip the link as invalid instead of
+    repointing it. The original link text is kept as the alias so the
+    surrounding prose still reads naturally."""
+    def _repl(m: "re.Match") -> str:
+        target, alias = m.group(1).strip(), m.group(2)
+        real_title = title_map.get(target)
+        if real_title and real_title != target:
+            return f"[[{real_title}|{alias if alias is not None else target}]]"
+        return m.group(0)
+
+    return _WIKILINK_RE.sub(_repl, body)
+
+
 def defuse_invalid_links(body: str, valid_titles: set) -> str:
     """Replace any [[Title]] whose target isn't in valid_titles with plain
     text (the alias if given, else the target name) -- enforces the 'don't
